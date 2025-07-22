@@ -7,6 +7,7 @@ pub mod round {
     use super::*;
 
     // Initialize the contract with the slot price and fee
+ // Initialize the contract with the slot price, fee, and vault creation
     pub fn initialize(ctx: Context<Initialize>, slot_token_price: u64, fee: u32) -> Result<()> {
         let global_state = &mut ctx.accounts.global_state;
         global_state.slot_token_price = slot_token_price;
@@ -15,21 +16,23 @@ pub mod round {
         global_state.paused = false;
         global_state.emergency_mode = false;
 
+        // Derive the vault PDA using the program ID and the owner’s public key
+        let (vault_pda, _) = Pubkey::find_program_address(
+            &[b"vault", global_state.owner.as_ref()],
+            ctx.program_id,
+        );
+
+        // Ensure the vault is initialized and matches the expected PDA
+        if ctx.accounts.vault.key() != vault_pda {
+            return Err(RoundError::VaultMismatch.into()); // Vault doesn't match the expected PDA
+        }
+
         Ok(())
     }
 
-    // Create a new round for the slot purchase
-    pub fn create_round(ctx: Context<CreateRound>, round_index: u16) -> Result<()> {
-        let round = &mut ctx.accounts.round;
-        round.round_index = round_index;
-        round.total_slot_number = 0;
-        round.current_slot_number = 0;
-
-        Ok(())
-    }
-
-    // Buy slots (with Chad mod if >= 4 slots are bought)
-    pub fn buy_slot(
+    // Buy slots and transfer the SOL to the vault
+     // Buy slots (with Chad mod if >= 4 slots are bought)
+        pub fn buy_slot(
         ctx: Context<BuySlot>,
         round_index: u16,
         amount: u32,
@@ -46,6 +49,22 @@ pub mod round {
 
         // Calculate the total price for the amount of slots
         let price = global_state.slot_token_price * (amount as u64);
+        let price_lamports = price as u64;
+
+        // Derive the vault PDA again using the program ID and owner’s public key
+        let (vault_pda, _) = Pubkey::find_program_address(
+            &[b"vault", global_state.owner.as_ref()],
+            ctx.program_id,
+        );
+
+        // Check if the provided vault matches the derived PDA
+        if ctx.accounts.vault.key() != vault_pda {
+            return Err(RoundError::VaultMismatch.into()); // Vault doesn't match the expected PDA
+        }
+
+        // Transfer the SOL from the user to the vault
+        **ctx.accounts.user.to_account_info().try_borrow_mut_lamports()? -= price_lamports;
+        **ctx.accounts.vault.to_account_info().try_borrow_mut_lamports()? += price_lamports;
 
         // Process Chad mod logic if the user buys >= 4 slots
         if method && amount >= 4 {
@@ -69,6 +88,16 @@ pub mod round {
         Ok(())
     }
 
+    // Create a new round for the slot purchase
+      pub fn create_round(ctx: Context<CreateRound>, round_index: u16) -> Result<()> {
+        let round = &mut ctx.accounts.round;
+        round.round_index = round_index;
+        round.total_slot_number = 0;
+        round.current_slot_number = 0;
+
+        Ok(())
+    }
+   
     // Claim the slot (only available if conditions are met)
     pub fn claim_slot(ctx: Context<ClaimSlot>) -> Result<()> {
         let user_info = &mut ctx.accounts.user_info;
@@ -149,6 +178,7 @@ pub mod round {
         global_state.owner = new_owner;
         Ok(())
     }
+
 }
 
 // Custom error definitions
@@ -165,7 +195,12 @@ pub enum RoundError {
 
     #[msg("The timelock has not expired yet.")]
     TimelockNotExpired,
+
+    #[msg("The vault PDA does not match the expected address.")]
+    VaultMismatch,
 }
+
+
 
 // Accounts structs
 #[derive(Accounts)]
@@ -175,6 +210,10 @@ pub struct Initialize<'info> {
     #[account(mut)]
     pub owner: Signer<'info>,
     pub system_program: Program<'info, System>,
+    #[account(init, payer = owner, space = 8 + 256)] // Initialize vault as a PDA
+     /// CHECK: The vault is a Program Derived Address (PDA) derived from the owner's public key.
+    /// This is safe because only the contract and the owner have access to this vault.
+    pub vault: AccountInfo<'info>, // Vault to store SOL
 }
 
 #[derive(Accounts)]
@@ -188,18 +227,24 @@ pub struct CreateRound<'info> {
     pub system_program: Program<'info, System>,
 }
 
+
 #[derive(Accounts)]
 pub struct BuySlot<'info> {
     #[account(mut)]
-    pub user: Signer<'info>,
+    pub user: Signer<'info>,                      // User making the purchase
     #[account(mut)]
-    pub global_state: Account<'info, GlobalState>,
+    pub global_state: Account<'info, GlobalState>, // Contract global state
     #[account(mut)]
-    pub round: Account<'info, RoundState>,
+    pub round: Account<'info, RoundState>,         // Round state
     #[account(mut)]
-    pub user_info: Account<'info, UserInfo>,
-    pub system_program: Program<'info, System>,
+    pub user_info: Account<'info, UserInfo>,       // User-specific info
+    #[account(mut)]
+     /// CHECK: The vault is a Program Derived Address (PDA) derived from the owner's public key.
+    /// This is safe because only the contract and the owner have access to this vault.
+    pub vault: AccountInfo<'info>,                 // Contract vault (PDA)
+    pub system_program: Program<'info, System>,    // System program
 }
+
 
 #[derive(Accounts)]
 pub struct ClaimSlot<'info> {
@@ -228,8 +273,9 @@ pub struct EmergencyControl<'info> {
     pub owner: Signer<'info>,
     #[account(mut)]
     pub global_state: Account<'info, GlobalState>,
-
-    /// CHECK: The vault account stores the funds in the contract, and we assume it is safe to modify.
+    // The vault account stores the funds in the contract, and we assume it is safe to modify.
+    /// CHECK: The vault is a Program Derived Address (PDA) that is derived from the owner's public key.
+    /// The contract controls access to the vault, ensuring it is safe to use here.
     #[account(mut)]
     pub vault: AccountInfo<'info>,
 }
@@ -283,7 +329,6 @@ pub struct UserInfo {
     pub claimed_slot_number: u32,
     pub chad_last_slot_number: u32,
 }
-
 #[event]
 pub struct SlotPurchased {
     pub user: Pubkey,

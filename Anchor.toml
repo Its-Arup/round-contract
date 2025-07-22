@@ -12,7 +12,7 @@ round_contract = "38sbRMbhMrbw6i1Cn21zoFBWoCBzHUyCjDEu5QF9XGGw"
 url = "https://api.apr.dev"
 
 [provider]
-cluster = "localnet"
+cluster = "Devnet"
 wallet = "~/.config/solana/id.json"
 
 [scripts]
